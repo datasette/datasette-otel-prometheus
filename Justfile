@@ -35,6 +35,17 @@ dev *options: demo-db
         -s plugins.datasette-otel-prometheus.service_name demo-datasette \
         -p 8002 {{ options }}
 
+# Same, against the editable core checkout - the only variant that shows
+# core's phase-3 datasette_* / db_client_* metrics (plain `dev` serves PyPI's
+# alpha, which emits none, so /-/metrics stays empty until something records)
+dev-core *options: demo-db
+    uv run --no-project --isolated \
+      --with-editable . \
+      --with-editable ~/projects/datasette \
+      datasette demo.db \
+        -s plugins.datasette-otel-prometheus.service_name demo-datasette \
+        -p 8002 {{ options }}
+
 # Scrape the endpoint the way Prometheus would
 scrape:
     curl -s http://localhost:8002/-/metrics
