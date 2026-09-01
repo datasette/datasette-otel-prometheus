@@ -75,7 +75,9 @@ plugins:
 
 ## Dev environment gotcha
 
-Core emits no metrics on any branch yet (phase 3 in progress on
-`asg017/otel-metrics-phase3`). The plugin is built and tested against its own test
-meters; the integration smoke test against core's `datasette_*` metrics is pending
-that branch. Demos run with `--with-editable ~/projects/datasette` per house style.
+Core metrics are phase 3, in progress on `asg017/otel-metrics-phase3`. The plugin
+is built and tested standalone against PyPI's datasette 1.0 alpha (`just test`);
+`just test-core` runs against the editable checkout. Integration was verified
+manually 2026-09-01 against that branch: core's `datasette_*` gauges and the write
+queue wait histogram appear at `/-/metrics` with zero plugin changes (details in
+ticket 03). Commit a real integration test once the branch stabilizes.

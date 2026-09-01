@@ -24,8 +24,15 @@ Cases:
 6. Foreign provider: reset metrics globals, install an SDK provider first →
    plugin goes foreign, endpoint still 200s with a well-formed (possibly
    empty) exposition, one stderr line.
-7. Pending (blocked on core phase 3): integration smoke asserting
-   `datasette_*` metrics from core appear — see PLAN "Dev environment gotcha".
+7. Integration smoke against core: VERIFIED 2026-09-01 (manual, not yet a
+   committed test) once the checkout landed on `asg017/otel-metrics-phase3`:
+   one request against an editable-core Datasette produced
+   `datasette_connections_open`, `datasette_sql_queries_pending`,
+   `datasette_sql_threads_limit`, `datasette_sql_threads_queue_depth`,
+   `datasette_write_queue_depth` and the `datasette_write_queue_wait_seconds`
+   histogram in the plugin's registry with zero plugin changes. `just
+   test-core` also passes (8/8). Turn this into a committed test once that
+   branch stabilizes.
 
 Bootstrap: metrics globals are set-once (`metrics._internal._METER_PROVIDER` /
 `_METER_PROVIDER_SET_ONCE`), reset the same way the trace plugins' conftests
