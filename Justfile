@@ -1,27 +1,14 @@
-# Unlike the sibling trace plugins, this one does not need the editable
-# ~/projects/datasette checkout: it serves whatever is recorded through the
-# OTel metrics API, and the hooks it uses (register_routes, startup, plugin
-# config) all exist in the published 1.0 alphas. Core's own metrics are phase
-# 3, in progress on the asg017/otel-metrics-phase3 branch - use `test-core`
-# to run against that checkout once it stabilizes.
+# datasette resolves through the [tool.uv.sources] override in pyproject.toml,
+# which pins the asg017/otel-phase1-6-plugin-kit branch of simonw/datasette.
+# That branch carries core's own datasette_* / db_client_* metrics, so `dev`
+# shows them at /-/metrics without any local checkout.
 
 default:
     @just --list --unsorted
 
-# Run the test suite against PyPI's datasette 1.0 alpha
+# Run the test suite
 test *options:
-    uv run --isolated \
-      --with-editable . \
-      --with pytest --with pytest-asyncio \
-      pytest {{ options }}
-
-# Same, against the editable core checkout (phase-3 metrics integration)
-test-core *options:
-    uv run --no-project --isolated \
-      --with-editable . \
-      --with-editable ~/projects/datasette \
-      --with pytest --with pytest-asyncio \
-      pytest {{ options }}
+    uv run pytest {{ options }}
 
 # Generate demo.db (200-row table) if missing
 demo-db:
@@ -29,20 +16,7 @@ demo-db:
 
 # Datasette with the plugin serving /-/metrics on port 8002
 dev *options: demo-db
-    uv run --isolated \
-      --with-editable . \
-      datasette demo.db \
-        -s plugins.datasette-otel-prometheus.service_name demo-datasette \
-        -p 8002 {{ options }}
-
-# Same, against the editable core checkout - the only variant that shows
-# core's phase-3 datasette_* / db_client_* metrics (plain `dev` serves PyPI's
-# alpha, which emits none, so /-/metrics stays empty until something records)
-dev-core *options: demo-db
-    uv run --no-project --isolated \
-      --with-editable . \
-      --with-editable ~/projects/datasette \
-      datasette demo.db \
+    uv run datasette demo.db \
         -s plugins.datasette-otel-prometheus.service_name demo-datasette \
         -p 8002 {{ options }}
 
