@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 # Tested against opentelemetry-sdk 1.44.0, opentelemetry-exporter-prometheus
 # 0.65b0, prometheus_client 0.26.0
 dependencies = [
-    "datasette>=1a37",
+    "datasette>=1.0a41",
     "opentelemetry-sdk>=1.37",
     "opentelemetry-exporter-prometheus>=0.58b0",
     "prometheus-client",
@@ -40,6 +40,3 @@ include = ["datasette_otel_prometheus*"]
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
-
-[tool.uv.sources]
-datasette = { git = "https://github.com/simonw/datasette", rev = "asg017/otel-phase1-6-plugin-kit" }
