@@ -23,7 +23,8 @@ import os
 import re
 import sys
 
-from datasette import hookimpl, Response
+from datasette import Response, hookimpl
+from datasette.permissions import Action
 from opentelemetry import metrics
 from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
@@ -38,6 +39,7 @@ from prometheus_client import (
 )
 
 PLUGIN_NAME = "datasette-otel-prometheus"
+ACTION_NAME = "datasette-prometheus-metrics"
 DEFAULT_SERVICE_NAME = "datasette"
 DEFAULT_PATH = "/-/metrics"
 
@@ -119,6 +121,16 @@ def startup(datasette):
 
 
 @hookimpl
+def register_actions():
+    return [
+        Action(
+            name=ACTION_NAME,
+            description="View Prometheus metrics",
+        )
+    ]
+
+
+@hookimpl
 def register_routes(datasette):
     config = _plugin_config(datasette)
     path = str(config.get("path") or DEFAULT_PATH)
@@ -126,7 +138,12 @@ def register_routes(datasette):
         path = "/" + path
 
     async def serve_metrics(request, datasette):
-        if _plugin_config(datasette).get("actor_required") and request.actor is None:
+        # Metric names and label values can reveal usage patterns, so the
+        # endpoint is deny-by-default like any other plugin action. Grant it
+        # through a permissions block (to "unauthenticated" for a scraper on a
+        # private network, or to a token/actor id). Plain text rather than
+        # raising Forbidden: scrapers do not want an HTML error page.
+        if not await datasette.allowed(action=ACTION_NAME, actor=request.actor):
             return Response.text("Forbidden", status=403)
         body = generate_latest(_state["registry"])
         return Response(

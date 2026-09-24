@@ -51,19 +51,35 @@ plugins:
   datasette-otel-prometheus:
     path: /-/metrics          # default
     service_name: my-datasette  # sets service_name in target_info; default "datasette"
-    actor_required: false     # true -> 403 for requests with no actor
 ```
 
 `OTEL_SERVICE_NAME` in the environment beats the `service_name` setting.
 
 ## Access control
 
-`/-/metrics` is **open by default** — Prometheus scrapers don't log in. Metric
-names and label values can reveal usage patterns of your instance, so on a public
-Datasette either leave this plugin uninstalled, set `actor_required: true` (and
-scrape with an authenticated client), or restrict the port the scraper reaches.
-On Fly, the `[metrics]` scrape happens over Fly's private network, so the endpoint
-does not need to be publicly reachable if your app only exposes it internally.
+The endpoint is gated by the `datasette-prometheus-metrics` permission and is
+**denied by default** — anyone without it, signed in or not, gets a plain-text
+`403`. Metric names and label values can reveal usage patterns of your instance,
+so grant it deliberately, the same way as any other Datasette action:
+
+```yaml
+permissions:
+  datasette-prometheus-metrics:
+    unauthenticated: true   # scraper on a private network, no login
+```
+
+or, for a scraper that authenticates (e.g. an API token from
+`datasette-auth-tokens`, or a specific actor):
+
+```yaml
+permissions:
+  datasette-prometheus-metrics:
+    id: prometheus
+```
+
+`datasette --root` grants it to the root user like every other action. On Fly,
+the `[metrics]` scrape happens over Fly's private network, so `unauthenticated:
+true` is reasonable as long as your app only exposes the port internally.
 
 ## Running under `opentelemetry-instrument`
 

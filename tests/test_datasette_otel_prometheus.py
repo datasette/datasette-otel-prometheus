@@ -10,11 +10,20 @@ from opentelemetry.sdk.metrics import MeterProvider
 import datasette_otel_prometheus
 from conftest import reset_meter_state
 
+ACTION = datasette_otel_prometheus.ACTION_NAME
 
-async def make_datasette(plugin_config=None):
+
+async def make_datasette(plugin_config=None, permissions=None):
+    # The endpoint is deny-by-default; most tests just want to read it, so
+    # grant it to everyone unless the test says otherwise
+    if permissions is None:
+        permissions = {ACTION: {"unauthenticated": True, "id": "*"}}
     datasette = Datasette(
         memory=True,
-        config={"plugins": {"datasette-otel-prometheus": plugin_config or {}}},
+        config={
+            "plugins": {"datasette-otel-prometheus": plugin_config or {}},
+            "permissions": permissions,
+        },
     )
     await datasette.invoke_startup()
     return datasette
@@ -83,7 +92,7 @@ def test_proxy_meter_rebinds_to_late_installed_provider():
         """
     )
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout
@@ -97,15 +106,37 @@ async def test_path_config_moves_the_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_actor_required():
-    datasette = await make_datasette({"actor_required": True})
+async def test_action_is_registered():
+    datasette = await make_datasette()
+    assert ACTION in datasette.actions
+    assert datasette.actions[ACTION].description == "View Prometheus metrics"
+
+
+@pytest.mark.asyncio
+async def test_denied_by_default():
+    datasette = await make_datasette(permissions={})
     anonymous = await datasette.client.get("/-/metrics")
     assert anonymous.status_code == 403
-    cookie = datasette.sign({"a": {"id": "root"}}, "actor")
-    signed_in = await datasette.client.get(
-        "/-/metrics", cookies={"ds_actor": cookie}
-    )
-    assert signed_in.status_code == 200
+    assert anonymous.text == "Forbidden"
+    cookie = datasette.sign({"a": {"id": "someone"}}, "actor")
+    signed_in = await datasette.client.get("/-/metrics", cookies={"ds_actor": cookie})
+    assert signed_in.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_permission_granted_to_actor_id():
+    datasette = await make_datasette(permissions={ACTION: {"id": "scraper"}})
+    assert (await datasette.client.get("/-/metrics")).status_code == 403
+    cookie = datasette.sign({"a": {"id": "scraper"}}, "actor")
+    response = await datasette.client.get("/-/metrics", cookies={"ds_actor": cookie})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain; version=")
+
+
+@pytest.mark.asyncio
+async def test_permission_granted_to_unauthenticated():
+    datasette = await make_datasette(permissions={ACTION: {"unauthenticated": True}})
+    assert (await datasette.client.get("/-/metrics")).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -123,7 +154,7 @@ async def test_otel_service_name_env_beats_config(monkeypatch):
     monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env")
     reset_meter_state()
     datasette_otel_prometheus._install()
-    datasette = await make_datasette({"service_name": "from-config"})
+    await make_datasette({"service_name": "from-config"})
     resource = datasette_otel_prometheus._state["resource"]
     assert resource.attributes["service.name"] == "from-env"
 
