@@ -32,7 +32,12 @@ CI = "https://github.com/datasette/datasette-otel-prometheus/actions"
 otel_prometheus = "datasette_otel_prometheus"
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio"]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff>=0.16.8",
+    "ty>=0.0.84",
+]
 
 [tool.setuptools.packages.find]
 include = ["datasette_otel_prometheus*"]
@@ -40,3 +45,6 @@ include = ["datasette_otel_prometheus*"]
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff.lint.isort]
+known-first-party = ["datasette_otel_prometheus", "conftest"]
