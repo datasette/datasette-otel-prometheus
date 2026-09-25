@@ -9,11 +9,13 @@ import urllib.request
 
 import pytest
 from datasette.app import Datasette
+from datasette.utils import StartupError
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 
 import datasette_otel_prometheus
 from conftest import reset_meter_state
+from datasette_otel_prometheus import PluginConfig
 
 
 def free_port():
@@ -119,15 +121,32 @@ def test_proxy_meter_rebinds_to_late_installed_provider():
     assert "OK" in result.stdout
 
 
-def test_listen_address():
-    assert datasette_otel_prometheus._listen_address({}) is None
-    assert datasette_otel_prometheus._listen_address({"port": 9100}) == (
+def test_config_defaults():
+    config = PluginConfig()
+    assert (config.host, config.port, config.service_name) == (
         "127.0.0.1",
-        9100,
+        None,
+        None,
     )
-    assert datasette_otel_prometheus._listen_address(
-        {"host": "0.0.0.0", "port": "9100"}
-    ) == ("0.0.0.0", 9100)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plugin_config,expected",
+    [
+        ({"prot": 9100}, "prot: Extra inputs are not permitted"),
+        ({"port": "nope"}, "port: Input should be a valid integer"),
+        ({"port": 0}, "port: Input should be greater than or equal to 1"),
+        ({"port": 70000}, "port: Input should be less than or equal to 65535"),
+        ({"host": 5}, "host: Input should be a valid string"),
+    ],
+)
+async def test_invalid_config_raises_startup_error(plugin_config, expected):
+    with pytest.raises(StartupError) as excinfo:
+        await make_datasette(plugin_config)
+    message = str(excinfo.value)
+    assert message.startswith("Invalid datasette-otel-prometheus plugin config")
+    assert expected in message
 
 
 @pytest.mark.asyncio

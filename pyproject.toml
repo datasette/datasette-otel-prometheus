@@ -16,6 +16,7 @@ dependencies = [
     "opentelemetry-sdk>=1.37",
     "opentelemetry-exporter-prometheus>=0.58b0",
     "prometheus-client",
+    "pydantic>=2",
 ]
 
 [build-system]

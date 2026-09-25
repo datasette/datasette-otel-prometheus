@@ -13,6 +13,7 @@ import os
 import sys
 
 from datasette import hookimpl
+from datasette.utils import StartupError
 from opentelemetry import metrics
 from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
@@ -21,10 +22,21 @@ from opentelemetry.metrics._internal import _ProxyMeterProvider
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource
 from prometheus_client import CollectorRegistry, start_http_server
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 PLUGIN_NAME = "datasette-otel-prometheus"
 DEFAULT_SERVICE_NAME = "datasette"
-DEFAULT_HOST = "127.0.0.1"
+
+
+class PluginConfig(BaseModel):
+    # Unknown keys are almost always typos ("prot"), which would otherwise
+    # silently leave the listener off
+    model_config = ConfigDict(extra="forbid")
+
+    port: int | None = Field(default=None, ge=1, le=65535)
+    host: str = "127.0.0.1"
+    service_name: str | None = None
+
 
 # Module state, rebuilt by _install(). "mode" is one of:
 #   "owner"   - our provider is the global one; metrics flow into our registry
@@ -86,14 +98,14 @@ def _set_service_name(resource, service_name):
 
 
 def _plugin_config(datasette):
-    return datasette.plugin_config(PLUGIN_NAME) or {}
-
-
-def _listen_address(config):
-    "(host, port) for the listener, or None when no port is configured."
-    if config.get("port") is None:
-        return None
-    return str(config.get("host") or DEFAULT_HOST), int(config["port"])
+    try:
+        return PluginConfig.model_validate(datasette.plugin_config(PLUGIN_NAME) or {})
+    except ValidationError as e:
+        problems = "; ".join(
+            f"{'.'.join(map(str, err['loc'])) or 'config'}: {err['msg']}"
+            for err in e.errors()
+        )
+        raise StartupError(f"Invalid {PLUGIN_NAME} plugin config - {problems}")
 
 
 async def _serve_metrics_port(host, port):
@@ -123,17 +135,15 @@ def startup(datasette):
     config = _plugin_config(datasette)
     if (
         _state["mode"] == "owner"
-        and config.get("service_name")
+        and config.service_name
         and "OTEL_SERVICE_NAME" not in os.environ
     ):
-        _set_service_name(_state["resource"], str(config["service_name"]))
+        _set_service_name(_state["resource"], config.service_name)
 
-    address = _listen_address(config)
-    if address is None:
+    if config.port is None:
         return
-    host, port = address
 
     async def metrics_server(datasette):
-        await _serve_metrics_port(host, port)
+        await _serve_metrics_port(config.host, config.port)
 
     datasette.add_background_task(metrics_server, name=f"{PLUGIN_NAME} server")
