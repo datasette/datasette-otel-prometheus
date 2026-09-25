@@ -25,6 +25,7 @@ demo-db:
 dev *options: demo-db
     uv run datasette demo.db \
         -s plugins.datasette-otel-prometheus.service_name demo-datasette \
+        -s plugins.datasette-otel-prometheus.port 9464 \
         -p 8002 {{ options }}
 
 # Scrape the metrics listener the way Prometheus would

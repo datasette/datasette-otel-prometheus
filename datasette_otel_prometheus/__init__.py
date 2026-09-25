@@ -1,6 +1,7 @@
 """
-Serve Datasette's OpenTelemetry metrics to Prometheus on a dedicated port
-(default 127.0.0.1:9464/metrics), started as a Datasette background task.
+Serve Datasette's OpenTelemetry metrics to Prometheus at host:port/metrics
+(host defaults to 127.0.0.1), started as a Datasette background task. No
+listener starts unless ``port`` is configured.
 
 The MeterProvider is installed at import, since recordings made before one
 exists are dropped. If another provider got there first (e.g. under
@@ -24,7 +25,6 @@ from prometheus_client import CollectorRegistry, start_http_server
 PLUGIN_NAME = "datasette-otel-prometheus"
 DEFAULT_SERVICE_NAME = "datasette"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 9464
 
 # Module state, rebuilt by _install(). "mode" is one of:
 #   "owner"   - our provider is the global one; metrics flow into our registry
@@ -90,11 +90,10 @@ def _plugin_config(datasette):
 
 
 def _listen_address(config):
-    port = config.get("port")
-    return (
-        str(config.get("host") or DEFAULT_HOST),
-        DEFAULT_PORT if port is None else int(port),
-    )
+    "(host, port) for the listener, or None when no port is configured."
+    if config.get("port") is None:
+        return None
+    return str(config.get("host") or DEFAULT_HOST), int(config["port"])
 
 
 async def _serve_metrics_port(host, port):
@@ -129,7 +128,10 @@ def startup(datasette):
     ):
         _set_service_name(_state["resource"], str(config["service_name"]))
 
-    host, port = _listen_address(config)
+    address = _listen_address(config)
+    if address is None:
+        return
+    host, port = address
 
     async def metrics_server(datasette):
         await _serve_metrics_port(host, port)

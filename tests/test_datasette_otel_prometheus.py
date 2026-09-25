@@ -119,11 +119,27 @@ def test_proxy_meter_rebinds_to_late_installed_provider():
     assert "OK" in result.stdout
 
 
-def test_listen_address_defaults():
-    assert datasette_otel_prometheus._listen_address({}) == ("127.0.0.1", 9464)
+def test_listen_address():
+    assert datasette_otel_prometheus._listen_address({}) is None
+    assert datasette_otel_prometheus._listen_address({"port": 9100}) == (
+        "127.0.0.1",
+        9100,
+    )
     assert datasette_otel_prometheus._listen_address(
         {"host": "0.0.0.0", "port": "9100"}
     ) == ("0.0.0.0", 9100)
+
+
+@pytest.mark.asyncio
+async def test_no_listener_without_port():
+    datasette = await make_datasette()
+    await datasette.start_background_tasks()
+    assert not [
+        t
+        for t in datasette._background_tasks.tasks()
+        if t.name.startswith("datasette-otel-prometheus")
+    ]
+    await datasette.invoke_shutdown()
 
 
 @pytest.mark.asyncio
