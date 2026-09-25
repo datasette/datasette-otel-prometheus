@@ -1,6 +1,6 @@
 [project]
 name = "datasette-otel-prometheus"
-version = "0.1.0a0"
+version = "0.1.0a1"
 description = "Serve Datasette's OpenTelemetry metrics on a dedicated port for Prometheus scraping"
 readme = "README.md"
 authors = [{name = "Alex Garcia"}]
