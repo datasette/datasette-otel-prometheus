@@ -1,6 +1,11 @@
+import asyncio
+import contextlib
+import socket
 import subprocess
 import sys
 import textwrap
+import urllib.error
+import urllib.request
 
 import pytest
 from datasette.app import Datasette
@@ -10,23 +15,38 @@ from opentelemetry.sdk.metrics import MeterProvider
 import datasette_otel_prometheus
 from conftest import reset_meter_state
 
-ACTION = datasette_otel_prometheus.ACTION_NAME
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
-async def make_datasette(plugin_config=None, permissions=None):
-    # The endpoint is deny-by-default; most tests just want to read it, so
-    # grant it to everyone unless the test says otherwise
-    if permissions is None:
-        permissions = {ACTION: {"unauthenticated": True, "id": "*"}}
+def scrape(port):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as r:
+        return r.status, r.headers["content-type"], r.read().decode()
+
+
+async def make_datasette(plugin_config=None):
     datasette = Datasette(
         memory=True,
-        config={
-            "plugins": {"datasette-otel-prometheus": plugin_config or {}},
-            "permissions": permissions,
-        },
+        config={"plugins": {"datasette-otel-prometheus": plugin_config or {}}},
     )
     await datasette.invoke_startup()
     return datasette
+
+
+@contextlib.asynccontextmanager
+async def serving(plugin_config=None):
+    "A Datasette with its metrics listener up on a free port; yields the port."
+    port = free_port()
+    datasette = await make_datasette({"port": port, **(plugin_config or {})})
+    await datasette.start_background_tasks()
+    await asyncio.sleep(0)  # let the task bind
+    try:
+        yield port
+    finally:
+        await datasette.invoke_shutdown()
 
 
 @pytest.mark.asyncio
@@ -46,11 +66,12 @@ async def test_counter_and_histogram_appear_in_exposition():
     histogram = meter.create_histogram("e2e_query_seconds", unit="s")
     histogram.record(0.25)
 
-    datasette = await make_datasette()
-    response = await datasette.client.get("/-/metrics")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/plain; version=")
-    body = response.text
+    async with serving() as port:
+        # A blocking call on the event loop: the scrape still answers because
+        # the listener runs in its own thread
+        status, content_type, body = scrape(port)
+    assert status == 200
+    assert content_type.startswith("text/plain; version=")
     # Series carry otel_scope_* labels alongside recorded attributes, so
     # match the pieces rather than one exact line
     counter_line = next(
@@ -98,55 +119,65 @@ def test_proxy_meter_rebinds_to_late_installed_provider():
     assert "OK" in result.stdout
 
 
+def test_listen_address_defaults():
+    assert datasette_otel_prometheus._listen_address({}) == ("127.0.0.1", 9464)
+    assert datasette_otel_prometheus._listen_address(
+        {"host": "0.0.0.0", "port": "9100"}
+    ) == ("0.0.0.0", 9100)
+
+
 @pytest.mark.asyncio
-async def test_path_config_moves_the_endpoint():
-    datasette = await make_datasette({"path": "/metrics"})
-    assert (await datasette.client.get("/metrics")).status_code == 200
+async def test_no_metrics_route_on_datasette_port():
+    datasette = await make_datasette()
     assert (await datasette.client.get("/-/metrics")).status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_action_is_registered():
-    datasette = await make_datasette()
-    assert ACTION in datasette.actions
-    assert datasette.actions[ACTION].description == "View Prometheus metrics"
+async def test_port_not_bound_until_background_tasks_launch():
+    port = free_port()
+    datasette = await make_datasette({"port": port})
+    # invoke_startup alone (the --get / inspect shape) must not bind
+    with pytest.raises(urllib.error.URLError):
+        scrape(port)
+    await datasette.invoke_shutdown()
 
 
 @pytest.mark.asyncio
-async def test_denied_by_default():
-    datasette = await make_datasette(permissions={})
-    anonymous = await datasette.client.get("/-/metrics")
-    assert anonymous.status_code == 403
-    assert anonymous.text == "Forbidden"
-    cookie = datasette.sign({"a": {"id": "someone"}}, "actor")
-    signed_in = await datasette.client.get("/-/metrics", cookies={"ds_actor": cookie})
-    assert signed_in.status_code == 403
+async def test_listener_closes_on_shutdown():
+    async with serving() as port:
+        assert scrape(port)[0] == 200
+    with pytest.raises(urllib.error.URLError):
+        scrape(port)
 
 
 @pytest.mark.asyncio
-async def test_permission_granted_to_actor_id():
-    datasette = await make_datasette(permissions={ACTION: {"id": "scraper"}})
-    assert (await datasette.client.get("/-/metrics")).status_code == 403
-    cookie = datasette.sign({"a": {"id": "scraper"}}, "actor")
-    response = await datasette.client.get("/-/metrics", cookies={"ds_actor": cookie})
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/plain; version=")
-
-
-@pytest.mark.asyncio
-async def test_permission_granted_to_unauthenticated():
-    datasette = await make_datasette(permissions={ACTION: {"unauthenticated": True}})
-    assert (await datasette.client.get("/-/metrics")).status_code == 200
+async def test_port_in_use_crashes_task_with_clear_message(capsys):
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        datasette = await make_datasette({"port": port})
+        await datasette.start_background_tasks()
+        await asyncio.sleep(0.05)
+        (task,) = [
+            t
+            for t in datasette._background_tasks.tasks()
+            if t.name.startswith("datasette-otel-prometheus")
+        ]
+        assert task.state == "crashed"
+        assert isinstance(task.exception, OSError)
+        assert f"could not listen on 127.0.0.1:{port}" in capsys.readouterr().err
+        await datasette.invoke_shutdown()
 
 
 @pytest.mark.asyncio
 async def test_service_name_config_lands_in_target_info():
     # target_info only renders once at least one metric exists
     metrics.get_meter("test-service-name").create_counter("svc_probe").add(1)
-    datasette = await make_datasette({"service_name": "my-datasette"})
-    response = await datasette.client.get("/-/metrics")
-    assert 'service_name="my-datasette"' in response.text
-    assert "target_info" in response.text
+    async with serving({"service_name": "my-datasette"}) as port:
+        body = scrape(port)[2]
+    assert 'service_name="my-datasette"' in body
+    assert "target_info" in body
 
 
 @pytest.mark.asyncio
@@ -167,7 +198,7 @@ async def test_foreign_provider_serves_empty_but_wellformed(capsys):
     assert datasette_otel_prometheus._state["mode"] == "foreign"
     assert "already installed" in capsys.readouterr().err
 
-    datasette = await make_datasette()
-    response = await datasette.client.get("/-/metrics")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/plain; version=")
+    async with serving() as port:
+        status, content_type, _body = scrape(port)
+    assert status == 200
+    assert content_type.startswith("text/plain; version=")

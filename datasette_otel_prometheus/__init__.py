@@ -1,30 +1,17 @@
 """
-Serve Datasette's OpenTelemetry metrics at /-/metrics for Prometheus scraping.
+Serve Datasette's OpenTelemetry metrics to Prometheus on a dedicated port
+(default 127.0.0.1:9464/metrics), started as a Datasette background task.
 
-Datasette core (phase 3) and other plugins record metrics through the
-OpenTelemetry metrics API, but without a MeterProvider every recording is a
-no-op. This plugin installs an SDK ``MeterProvider`` whose
-``PrometheusMetricReader`` renders everything into a dedicated
-``prometheus_client`` registry, and serves that registry in Prometheus text
-format from a ``register_routes()`` endpoint. The reader collects on scrape,
-so the exposition is always current and there is no export interval.
-
-The provider is installed at module import: the API's ``_ProxyMeterProvider``
-re-binds meters and instruments created before ``set_meter_provider()``, but
-recordings made before a provider exists are dropped, so earlier is better.
-
-If some other machinery (the ``opentelemetry-instrument`` agent) already
-installed a MeterProvider, this plugin announces itself once on stderr and
-serves its own - then empty - registry rather than 404ing: SDK metric readers
-are constructor-only, so a foreign provider cannot be joined after the fact.
+The MeterProvider is installed at import, since recordings made before one
+exists are dropped. If another provider got there first (e.g. under
+opentelemetry-instrument), we can't join it, so we serve an empty registry.
 """
 
+import asyncio
 import os
-import re
 import sys
 
-from datasette import Response, hookimpl
-from datasette.permissions import Action
+from datasette import hookimpl
 from opentelemetry import metrics
 from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
@@ -32,16 +19,12 @@ from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.metrics._internal import _ProxyMeterProvider
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    generate_latest,
-)
+from prometheus_client import CollectorRegistry, start_http_server
 
 PLUGIN_NAME = "datasette-otel-prometheus"
-ACTION_NAME = "datasette-prometheus-metrics"
 DEFAULT_SERVICE_NAME = "datasette"
-DEFAULT_PATH = "/-/metrics"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 9464
 
 # Module state, rebuilt by _install(). "mode" is one of:
 #   "owner"   - our provider is the global one; metrics flow into our registry
@@ -106,6 +89,33 @@ def _plugin_config(datasette):
     return datasette.plugin_config(PLUGIN_NAME) or {}
 
 
+def _listen_address(config):
+    port = config.get("port")
+    return (
+        str(config.get("host") or DEFAULT_HOST),
+        DEFAULT_PORT if port is None else int(port),
+    )
+
+
+async def _serve_metrics_port(host, port):
+    try:
+        server, _thread = start_http_server(
+            port, addr=host, registry=_state["registry"]
+        )
+    except OSError as e:
+        _log(f"could not listen on {host}:{port} - {e}")
+        raise
+    try:
+        # The thread does the serving; this task only holds the listener
+        # open until Datasette cancels it at shutdown
+        await asyncio.Event().wait()
+    finally:
+        # shutdown() blocks until serve_forever() notices, up to its 0.5s
+        # poll interval - keep that off the event loop
+        await asyncio.to_thread(server.shutdown)
+        server.server_close()
+
+
 _install()
 
 
@@ -119,36 +129,9 @@ def startup(datasette):
     ):
         _set_service_name(_state["resource"], str(config["service_name"]))
 
+    host, port = _listen_address(config)
 
-@hookimpl
-def register_actions():
-    return [
-        Action(
-            name=ACTION_NAME,
-            description="View Prometheus metrics",
-        )
-    ]
+    async def metrics_server(datasette):
+        await _serve_metrics_port(host, port)
 
-
-@hookimpl
-def register_routes(datasette):
-    config = _plugin_config(datasette)
-    path = str(config.get("path") or DEFAULT_PATH)
-    if not path.startswith("/"):
-        path = "/" + path
-
-    async def serve_metrics(request, datasette):
-        # Metric names and label values can reveal usage patterns, so the
-        # endpoint is deny-by-default like any other plugin action. Grant it
-        # through a permissions block (to "unauthenticated" for a scraper on a
-        # private network, or to a token/actor id). Plain text rather than
-        # raising Forbidden: scrapers do not want an HTML error page.
-        if not await datasette.allowed(action=ACTION_NAME, actor=request.actor):
-            return Response.text("Forbidden", status=403)
-        body = generate_latest(_state["registry"])
-        return Response(
-            body.decode("utf-8"),
-            content_type=CONTENT_TYPE_LATEST,
-        )
-
-    return [(r"^" + re.escape(path) + r"$", serve_metrics)]
+    datasette.add_background_task(metrics_server, name=f"{PLUGIN_NAME} server")
