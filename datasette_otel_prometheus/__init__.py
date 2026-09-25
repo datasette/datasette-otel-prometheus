@@ -4,18 +4,17 @@ Serve Datasette's OpenTelemetry metrics to Prometheus at host:port/metrics
 listener starts unless ``port`` is configured.
 
 The MeterProvider is installed at import, since recordings made before one
-exists are dropped. If another provider got there first (e.g. under
+exists are dropped. Set the service name with OTEL_SERVICE_NAME (default
+"datasette"). If another provider got there first (e.g. under
 opentelemetry-instrument), we can't join it, so we serve an empty registry.
 """
 
 import asyncio
-import os
 import sys
 
 from datasette import hookimpl
 from datasette.utils import StartupError
 from opentelemetry import metrics
-from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.metrics._internal import _ProxyMeterProvider
@@ -35,66 +34,32 @@ class PluginConfig(BaseModel):
 
     port: int | None = Field(default=None, ge=1, le=65535)
     host: str = "127.0.0.1"
-    service_name: str | None = None
-
-
-# Module state, rebuilt by _install(). "mode" is one of:
-#   "owner"   - our provider is the global one; metrics flow into our registry
-#   "foreign" - someone else installed a provider first; we serve an empty
-#               registry and cannot see their metrics
-_state = {}
 
 
 def _log(message):
     print(f"{PLUGIN_NAME}: {message}", file=sys.stderr)
 
 
-def _install():
-    "Runs at module import; re-runnable by tests after resetting otel globals."
-    _state.clear()
-    registry = CollectorRegistry()
-    existing = metrics.get_meter_provider()
-    if not isinstance(existing, (_ProxyMeterProvider, NoOpMeterProvider)):
-        _log(
-            "a MeterProvider is already installed "
-            "(running under opentelemetry-instrument?) - metric readers are "
-            "constructor-only, so its metrics cannot be served here"
+_registry = CollectorRegistry()
+
+if isinstance(metrics.get_meter_provider(), (_ProxyMeterProvider, NoOpMeterProvider)):
+    # Honour OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES, and only fall back
+    # to "datasette" over the SDK's "unknown_service" placeholder
+    resource = Resource.create()
+    if str(resource.attributes.get("service.name", "")).startswith("unknown_service"):
+        resource = resource.merge(Resource({"service.name": DEFAULT_SERVICE_NAME}))
+    metrics.set_meter_provider(
+        MeterProvider(
+            metric_readers=[PrometheusMetricReader(registry=_registry)],
+            resource=resource,
         )
-        _state.update(mode="foreign", registry=registry, resource=None)
-        return
-
-    resource_attributes = {}
-    if "OTEL_SERVICE_NAME" not in os.environ:
-        resource_attributes["service.name"] = DEFAULT_SERVICE_NAME
-    resource = Resource.create(resource_attributes)
-
-    reader = PrometheusMetricReader(registry=registry)
-    provider = MeterProvider(metric_readers=[reader], resource=resource)
-    metrics.set_meter_provider(provider)
-
-    _state.update(
-        mode="owner",
-        registry=registry,
-        provider=provider,
-        reader=reader,
-        resource=resource,
     )
-
-
-def _set_service_name(resource, service_name):
-    # Resource is immutable by design, but the reader consults this exact
-    # object at collect time - replacing its attribute mapping lands the
-    # configured name in target_info without rebuilding the provider.
-    attributes = dict(resource.attributes)
-    attributes["service.name"] = service_name
-    resource._attributes = BoundedAttributes(attributes=attributes, immutable=True)
-    # The exporter's collector caches target_info at its first collect, so a
-    # swap after any scrape would never land - drop the cache (private attr,
-    # so best-effort: worst case an early scrape keeps the default name).
-    try:
-        _state["reader"]._collector._target_info = None
-    except (KeyError, AttributeError):
-        pass
+else:
+    _log(
+        "a MeterProvider is already installed "
+        "(running under opentelemetry-instrument?) - metric readers are "
+        "constructor-only, so its metrics cannot be served here"
+    )
 
 
 def _plugin_config(datasette):
@@ -110,9 +75,7 @@ def _plugin_config(datasette):
 
 async def _serve_metrics_port(host, port):
     try:
-        server, _thread = start_http_server(
-            port, addr=host, registry=_state["registry"]
-        )
+        server, _thread = start_http_server(port, addr=host, registry=_registry)
     except OSError as e:
         _log(f"could not listen on {host}:{port} - {e}")
         raise
@@ -127,19 +90,9 @@ async def _serve_metrics_port(host, port):
         server.server_close()
 
 
-_install()
-
-
 @hookimpl
 def startup(datasette):
     config = _plugin_config(datasette)
-    if (
-        _state["mode"] == "owner"
-        and config.service_name
-        and "OTEL_SERVICE_NAME" not in os.environ
-    ):
-        _set_service_name(_state["resource"], config.service_name)
-
     if config.port is None:
         return
 

@@ -48,4 +48,4 @@ asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff.lint.isort]
-known-first-party = ["datasette_otel_prometheus", "conftest"]
+known-first-party = ["datasette_otel_prometheus"]

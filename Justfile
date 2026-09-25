@@ -23,8 +23,7 @@ demo-db:
 # Datasette on port 8002, with metrics on the plugin's own listener at
 # 127.0.0.1:9464/metrics
 dev *options: demo-db
-    uv run datasette demo.db \
-        -s plugins.datasette-otel-prometheus.service_name demo-datasette \
+    OTEL_SERVICE_NAME=demo-datasette uv run datasette demo.db \
         -s plugins.datasette-otel-prometheus.port 9464 \
         -p 8002 {{ options }}
 

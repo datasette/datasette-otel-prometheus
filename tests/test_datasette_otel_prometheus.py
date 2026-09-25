@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import os
 import socket
 import subprocess
 import sys
@@ -11,10 +12,7 @@ import pytest
 from datasette.app import Datasette
 from datasette.utils import StartupError
 from opentelemetry import metrics
-from opentelemetry.sdk.metrics import MeterProvider
 
-import datasette_otel_prometheus
-from conftest import reset_meter_state
 from datasette_otel_prometheus import PluginConfig
 
 
@@ -85,14 +83,28 @@ async def test_counter_and_histogram_appear_in_exposition():
     assert "target_info" in body
 
 
+def run_fresh(script, **env):
+    """
+    Run a script in a new interpreter: OpenTelemetry's meter provider is
+    set-once per process, so anything about what happens at plugin import
+    needs a process of its own.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+    return result
+
+
 def test_proxy_meter_rebinds_to_late_installed_provider():
-    # The import-time-install claim: instruments created through the API's
-    # proxy BEFORE the plugin module imports re-bind to the plugin's provider.
-    # Must run in a clean subprocess - in this process the API's singleton
-    # proxy is permanently bound to the first provider ever installed (the
-    # conftest snapshot), so recordings would land in that provider's
-    # registry no matter what a later _install() does.
-    script = textwrap.dedent(
+    # Instruments created through the API's proxy BEFORE the plugin module
+    # imports re-bind to the plugin's provider
+    run_fresh(
         """
         from opentelemetry import metrics
 
@@ -104,9 +116,7 @@ def test_proxy_meter_rebinds_to_late_installed_provider():
         from prometheus_client import generate_latest
 
         counter.add(5)
-        body = generate_latest(
-            datasette_otel_prometheus._state["registry"]
-        ).decode()
+        body = generate_latest(datasette_otel_prometheus._registry).decode()
         line = next(
             l for l in body.splitlines() if l.startswith("proxy_early_total")
         )
@@ -114,20 +124,11 @@ def test_proxy_meter_rebinds_to_late_installed_provider():
         print("OK")
         """
     )
-    result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert "OK" in result.stdout
 
 
 def test_config_defaults():
     config = PluginConfig()
-    assert (config.host, config.port, config.service_name) == (
-        "127.0.0.1",
-        None,
-        None,
-    )
+    assert (config.host, config.port) == ("127.0.0.1", None)
 
 
 @pytest.mark.asyncio
@@ -205,35 +206,55 @@ async def test_port_in_use_crashes_task_with_clear_message(capsys):
         await datasette.invoke_shutdown()
 
 
-@pytest.mark.asyncio
-async def test_service_name_config_lands_in_target_info():
+SERVICE_NAME_SCRIPT = """
+    from opentelemetry import metrics
+    import datasette_otel_prometheus
+    from prometheus_client import generate_latest
+
     # target_info only renders once at least one metric exists
-    metrics.get_meter("test-service-name").create_counter("svc_probe").add(1)
-    async with serving({"service_name": "my-datasette"}) as port:
-        body = scrape(port)[2]
-    assert 'service_name="my-datasette"' in body
-    assert "target_info" in body
+    metrics.get_meter("probe").create_counter("probe").add(1)
+    body = generate_latest(datasette_otel_prometheus._registry).decode()
+    line = next(l for l in body.splitlines() if l.startswith("target_info"))
+    assert 'service_name="{expected}"' in line, line
+    print("OK")
+"""
 
 
-@pytest.mark.asyncio
-async def test_otel_service_name_env_beats_config(monkeypatch):
-    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env")
-    reset_meter_state()
-    datasette_otel_prometheus._install()
-    await make_datasette({"service_name": "from-config"})
-    resource = datasette_otel_prometheus._state["resource"]
-    assert resource.attributes["service.name"] == "from-env"
+def test_service_name_defaults_to_datasette():
+    env = {"OTEL_SERVICE_NAME": "", "OTEL_RESOURCE_ATTRIBUTES": ""}
+    run_fresh(SERVICE_NAME_SCRIPT.format(expected="datasette"), **env)
 
 
-@pytest.mark.asyncio
-async def test_foreign_provider_serves_empty_but_wellformed(capsys):
-    reset_meter_state()
-    metrics.set_meter_provider(MeterProvider())
-    datasette_otel_prometheus._install()
-    assert datasette_otel_prometheus._state["mode"] == "foreign"
-    assert "already installed" in capsys.readouterr().err
+def test_otel_service_name_env():
+    run_fresh(
+        SERVICE_NAME_SCRIPT.format(expected="from-env"),
+        OTEL_SERVICE_NAME="from-env",
+    )
 
-    async with serving() as port:
-        status, content_type, _body = scrape(port)
-    assert status == 200
-    assert content_type.startswith("text/plain; version=")
+
+def test_otel_resource_attributes_service_name():
+    run_fresh(
+        SERVICE_NAME_SCRIPT.format(expected="from-attrs"),
+        OTEL_SERVICE_NAME="",
+        OTEL_RESOURCE_ATTRIBUTES="service.name=from-attrs",
+    )
+
+
+def test_foreign_provider_serves_empty_registry():
+    result = run_fresh(
+        """
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+
+        metrics.set_meter_provider(MeterProvider())
+        metrics.get_meter("theirs").create_counter("theirs").add(1)
+
+        import datasette_otel_prometheus
+        from prometheus_client import generate_latest
+
+        body = generate_latest(datasette_otel_prometheus._registry).decode()
+        assert "theirs" not in body, body
+        print("OK")
+        """
+    )
+    assert "already installed" in result.stderr
